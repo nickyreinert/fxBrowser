@@ -94,9 +94,12 @@ are reprocessed automatically on the next rescan even though nothing on disk cha
   search box and starts filtering — all disabled while a text field, button, or checkbox
   already has focus so normal interaction isn't hijacked.
 - The player shows a waveform (one lane per channel — two for stereo) with a live
-  playhead while a file is playing, plus a live **level meter** (vertical bars, scrolling
-  history, green→yellow→red by level) tapped directly from the real audio stream —
-  the classic "Mäusekino" VU display.
+  playhead while a file is playing. **Click anywhere on the waveform to seek** — jumps
+  playback to that position (and starts playing there if nothing was playing yet).
+- Below the waveform, a live **spectrum meter** (vertical bars, one per log-spaced
+  frequency band — low frequencies on the left, high on the right, green→yellow→red by
+  level) is FFT'd directly from the real audio stream in Rust — the classic "Mäusekino"
+  display, but a real per-band analyzer rather than a scrolling level history.
 
 ## How metadata is derived
 

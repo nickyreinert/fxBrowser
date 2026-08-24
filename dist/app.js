@@ -668,7 +668,7 @@
   function animatePlayhead() {
     drawWaveform();
     if (state.isPlaying) {
-      invoke("get_playback_level")
+      invoke("get_playback_spectrum", { bars: METER_BARS })
         .then(updateLevelMeter)
         .catch(() => {});
       waveformAnimFrame = requestAnimationFrame(animatePlayhead);
@@ -684,12 +684,12 @@
     resetLevelMeter();
   }
 
-  // ---------------- "Mäusekino" level meter ----------------
-  // A row of vertical bars, each one a snapshot of the playback level a
-  // moment apart — new reading enters on the right, oldest scrolls off the
-  // left, like a classic multi-bar hardware level display.
+  // ---------------- "Mäusekino" spectrum meter ----------------
+  // A row of vertical bars, each one a log-spaced frequency band (low
+  // frequencies on the left, high on the right) — a classic real-time
+  // spectrum analyzer, not a level-over-time scroll.
   const METER_BARS = 40;
-  let levelHistory = new Array(METER_BARS).fill(0);
+  let spectrum = new Array(METER_BARS).fill(0);
 
   function buildLevelMeter() {
     const wrap = el("level-meter");
@@ -705,23 +705,19 @@
   function paintLevelMeter() {
     const bars = el("level-meter").children;
     for (let i = 0; i < bars.length; i++) {
-      const v = levelHistory[i];
+      const v = spectrum[i];
       bars[i].style.height = `${Math.max(4, Math.round(v * 100))}%`;
       bars[i].className = "bar " + (v < 0.6 ? "green" : v < 0.85 ? "yellow" : "red");
     }
   }
 
-  function updateLevelMeter(level) {
-    // RMS level is typically well under 1.0 for normal audio; a bit of gain
-    // makes the meter actually swing instead of sitting near the bottom.
-    const norm = Math.min(1, level * 2.5);
-    levelHistory.push(norm);
-    levelHistory.shift();
+  function updateLevelMeter(values) {
+    spectrum = values;
     paintLevelMeter();
   }
 
   function resetLevelMeter() {
-    levelHistory = new Array(METER_BARS).fill(0);
+    spectrum = new Array(METER_BARS).fill(0);
     paintLevelMeter();
   }
 
@@ -756,6 +752,25 @@
   el("play-toggle").addEventListener("click", () => {
     if (state.isPlaying) stopPlayback();
     else playSelected();
+  });
+
+  el("waveform-canvas").addEventListener("click", async (e) => {
+    const f = state.selectedFile;
+    const duration = f && f.duration_secs;
+    if (!f || !duration) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    const secs = frac * duration;
+
+    if (!state.isPlaying) {
+      invoke("play_file", { path: f.path, loopPlayback: state.loopPlayback });
+      state.isPlaying = true;
+      updatePlayToggle();
+      animatePlayhead();
+    }
+    await invoke("seek_playback", { secs }).catch(() => {});
+    state.playStartedAt = performance.now() - secs * 1000;
+    drawWaveform();
   });
 
   el("opt-autoplay").checked = state.autoplay;

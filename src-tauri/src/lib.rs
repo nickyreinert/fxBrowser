@@ -63,6 +63,8 @@ pub fn run() {
             commands::play_file,
             commands::stop_playback,
             commands::get_playback_level,
+            commands::get_playback_spectrum,
+            commands::seek_playback,
             commands::get_waveform,
             commands::toggle_favorite,
             commands::get_duration_bounds,

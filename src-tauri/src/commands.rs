@@ -23,6 +23,17 @@ pub fn get_playback_level(state: State<AppState>) -> f32 {
 }
 
 #[tauri::command]
+pub fn get_playback_spectrum(state: State<AppState>, bars: usize) -> Vec<f32> {
+    state.player.current_spectrum(bars)
+}
+
+#[tauri::command]
+pub fn seek_playback(state: State<AppState>, secs: f64) -> Result<(), String> {
+    state.player.seek(secs);
+    Ok(())
+}
+
+#[tauri::command]
 pub fn toggle_favorite(state: State<AppState>, id: i64) -> Result<bool, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     conn.execute(
