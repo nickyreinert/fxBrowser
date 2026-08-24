@@ -1,0 +1,14 @@
+{
+  "name": "fxbrowser",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "dev:nvidia": "GDK_BACKEND=x11 LIBGL_ALWAYS_SOFTWARE=1 tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

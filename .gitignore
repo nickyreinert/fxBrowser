@@ -1,0 +1,9 @@
+node_modules/
+src-tauri/target/
+src-tauri/gen/
+*.log
+.DS_Store
+
+# Separate, unrelated Python implementation from another session — not part
+# of this Tauri/Rust app. Remove this line if you want it tracked too.
+.removeme/

@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>FXBrowser</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <header id="topbar">
+      <div class="brand">FXBrowser</div>
+      <nav class="tabs">
+        <button class="tab-btn" data-view="browse">Browse</button>
+        <button class="tab-btn" data-view="settings">Settings</button>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section id="browse-view" class="view">
+        <aside id="sidebar" style="width: 260px">
+          <div class="field">
+            <label for="search-text">Search</label>
+            <input id="search-text" type="text" placeholder="filename, tag, description… (or just start typing)" />
+          </div>
+
+          <div class="field">
+            <div class="field-header">
+              <label>Length</label>
+              <span id="length-range-label" class="range-label"></span>
+            </div>
+            <div class="dual-slider">
+              <div class="slider-track"></div>
+              <div class="slider-range" id="slider-range-fill"></div>
+              <input id="min-secs" type="range" min="0" max="60" step="0.5" value="0" />
+              <input id="max-secs" type="range" min="0" max="60" step="0.5" value="60" />
+            </div>
+          </div>
+
+          <div class="field">
+            <label class="checkbox-row">
+              <input id="favorites-only" type="checkbox" />
+              <span>★ Favorites only</span>
+            </label>
+          </div>
+
+          <div class="field">
+            <div class="field-header">
+              <label>Categories</label>
+              <button id="clear-categories" class="link-btn">clear</button>
+            </div>
+            <div id="category-list" class="chip-list"></div>
+            <div class="resize-handle-v" data-resize-v="categories"></div>
+          </div>
+
+          <div class="field">
+            <div class="field-header">
+              <label title="Auto-detected from each file's audio, not from folder names or metadata">Sound type (detected)</label>
+              <button id="clear-sound-types" class="link-btn">clear</button>
+            </div>
+            <div id="sound-type-list" class="chip-list"></div>
+            <div class="resize-handle-v" data-resize-v="soundtypes"></div>
+          </div>
+
+          <div class="field grow">
+            <label>Folders</label>
+            <div id="folder-breadcrumb" class="breadcrumb" hidden></div>
+            <input id="folder-search" type="text" class="folder-search" placeholder="filter folders…" />
+            <div id="folder-tree" class="tree"></div>
+          </div>
+        </aside>
+
+        <div class="resize-handle" data-resize="sidebar"></div>
+
+        <section id="results-panel">
+          <div id="results-meta"></div>
+          <div id="results-list"></div>
+          <button id="load-more" class="secondary-btn" hidden>Load more</button>
+        </section>
+
+        <div class="resize-handle" data-resize="player"></div>
+
+        <section id="player-panel" style="width: 340px">
+          <div id="player-empty" class="empty-state">Select a sound to preview it here.</div>
+          <div id="player-loaded" hidden>
+            <div class="player-title-row">
+              <h2 id="player-filename"></h2>
+              <button id="player-favorite" class="heart-btn" title="Favorite">♡</button>
+            </div>
+            <div id="player-meta" class="meta-grid"></div>
+
+            <canvas id="waveform-canvas" width="300" height="90"></canvas>
+
+            <div id="level-meter" class="level-meter" title="Playback level"></div>
+
+            <button id="play-toggle" class="primary-btn playback-btn">▶ Play</button>
+            <div class="playback-options">
+              <label class="checkbox-row">
+                <input id="opt-autoplay" type="checkbox" checked />
+                <span>Autoplay</span>
+              </label>
+              <label class="checkbox-row">
+                <input id="opt-loop" type="checkbox" checked />
+                <span>Loop</span>
+              </label>
+            </div>
+
+            <p class="drag-hint">Drag <span id="drag-handle" class="drag-handle" title="Drag into another app">⠿ drag into another app</span></p>
+            <p id="player-description" class="description"></p>
+          </div>
+        </section>
+      </section>
+
+      <section id="settings-view" class="view" hidden>
+        <div class="settings-panel">
+          <h1>Library folders</h1>
+          <p class="hint">Add one or more folders containing your sound effects, loops and jingles. FXBrowser indexes them recursively, using parent-folder names as categories and any CSV/TXT/XLSX files it finds as extra metadata.</p>
+          <button id="add-folder" class="primary-btn">Add folder…</button>
+          <div id="roots-list" class="roots-list"></div>
+        </div>
+      </section>
+    </main>
+
+    <footer id="footer" class="collapsed">
+      <button id="footer-toggle" class="footer-toggle">
+        <span id="footer-summary">Idle</span>
+      </button>
+      <div id="footer-details" class="footer-details">
+        <div id="footer-progress-bar"><div id="footer-progress-fill"></div></div>
+        <div id="footer-current-file"></div>
+      </div>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
