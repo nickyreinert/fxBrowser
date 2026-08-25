@@ -766,8 +766,35 @@
     }
   }
 
+  // tauri-plugin-drag's start_drag command has a *required* `image` field
+  // (mapped from the JS call's `icon`) with no default — omitting it makes
+  // the whole IPC call reject immediately, so the native OS drag never
+  // actually starts and every attempt just falls through to the browser's
+  // default text-selection-drag behavior. Render a tiny icon once and reuse
+  // it, since any valid "data:image/png;base64,..." string satisfies it.
+  let dragIconDataUrl = null;
+  function getDragIcon() {
+    if (dragIconDataUrl) return dragIconDataUrl;
+    const size = 40;
+    const canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#7c6cf0";
+    ctx.beginPath();
+    ctx.arc(size / 2, size / 2, size / 2 - 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "20px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("♪", size / 2, size / 2 + 1);
+    dragIconDataUrl = canvas.toDataURL("image/png");
+    return dragIconDataUrl;
+  }
+
   function beginDrag(f) {
-    startDrag({ item: [f.path] }).catch((err) => console.error("drag failed", err));
+    startDrag({ item: [f.path], icon: getDragIcon() }).catch((err) => console.error("drag failed", err));
   }
   el("drag-handle").addEventListener("mousedown", (e) => {
     // Without this, mousedown+move on the handle starts a native text

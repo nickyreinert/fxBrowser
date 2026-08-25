@@ -373,6 +373,9 @@ input[type="text"]:focus, input[type="number"]:focus { outline: 1px solid var(--
   border: 1px solid var(--border);
   border-radius: 6px;
   cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
 }
 .level-meter {
   display: flex;
@@ -412,6 +415,7 @@ input[type="text"]:focus, input[type="number"]:focus { outline: 1px solid var(--
   cursor: grab;
   color: var(--text);
   user-select: none;
+  -webkit-user-drag: none;
 }
 .drag-handle:active { cursor: grabbing; }
 .description { font-size: 12px; color: var(--text-dim); margin-top: 10px; white-space: pre-wrap; }
