@@ -10,9 +10,11 @@ export LIBGL_ALWAYS_SOFTWARE=1
 # WebKitGTK >= 2.42 also uses a DMA-BUF renderer for accelerated compositing
 # that allocates GBM buffers independently of the GL backend above. On NVIDIA
 # this fails ("Failed to create GBM buffer ...") and leaves a gray window, so
-# disable it and fall back to plain software compositing.
+# disable just that renderer. (WEBKIT_DISABLE_COMPOSITING_MODE=1 also fixed
+# the gray screen, but fully disabling compositing broke click vs. drag vs.
+# text-selection gesture recognition — waveform click-to-seek stopped firing
+# and drag-out turned into text selection — so it's deliberately not set.)
 export WEBKIT_DISABLE_DMABUF_RENDERER=1
-export WEBKIT_DISABLE_COMPOSITING_MODE=1
 
 dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 bin="$dir/src-tauri/target/release/fxbrowser"

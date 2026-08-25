@@ -768,7 +768,10 @@
   function beginDrag(f) {
     startDrag({ item: [f.path] }).catch((err) => console.error("drag failed", err));
   }
-  el("drag-handle").addEventListener("mousedown", () => {
+  el("drag-handle").addEventListener("mousedown", (e) => {
+    // Without this, mousedown+move on the handle starts a native text
+    // selection instead of (or racing with) the OS drag-out below.
+    e.preventDefault();
     if (state.selectedFile) beginDrag(state.selectedFile);
   });
 
