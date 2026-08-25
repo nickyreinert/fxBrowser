@@ -608,6 +608,7 @@
     drag.textContent = "⠿";
     drag.title = "Drag into another app";
     drag.addEventListener("mousedown", (e) => {
+      e.preventDefault();
       e.stopPropagation();
       beginDrag(f);
     });
