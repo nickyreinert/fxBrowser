@@ -72,7 +72,21 @@
         <div class="resize-handle" data-resize="sidebar"></div>
 
         <section id="results-panel">
-          <div id="results-meta"></div>
+          <div id="results-toolbar">
+            <div id="results-meta"></div>
+            <div class="group-switch" role="group" aria-label="Group by">
+              <span class="group-switch-label">Group by</span>
+              <button type="button" class="group-btn" data-group="folder">Folder</button>
+              <button type="button" class="group-btn" data-group="type">Sound type</button>
+            </div>
+          </div>
+          <div id="results-header" class="result-row">
+            <span class="row-heart"></span>
+            <button type="button" class="result-name col-sort" data-sort="name">Name</button>
+            <button type="button" class="result-category col-sort" data-sort="folder">Folder</button>
+            <button type="button" class="result-duration col-sort" data-sort="duration">Duration</button>
+            <span class="result-drag"></span>
+          </div>
           <div id="results-list"></div>
           <button id="load-more" class="secondary-btn" hidden>Load more</button>
         </section>

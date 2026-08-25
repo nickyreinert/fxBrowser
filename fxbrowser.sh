@@ -22,6 +22,11 @@ bin="$dir/src-tauri/target/release/fxbrowser"
 # whenever any of that is newer than the binary we're about to launch.
 if [ ! -x "$bin" ] || [ -n "$(find "$dir/dist" "$dir/src-tauri/src" "$dir/src-tauri/Cargo.toml" "$dir/src-tauri/tauri.conf.json" -newer "$bin" -type f 2>/dev/null)" ]; then
     echo "fxbrowser.sh: source is newer than the built binary, rebuilding..." >&2
+    # build.rs only declares cargo:rerun-if-changed on tauri.conf.json and
+    # capabilities/ — NOT on dist/ — so cargo won't notice dist-only edits
+    # and would silently keep the old embedded frontend. Touch build.rs so
+    # cargo always reruns it and re-embeds whatever's in dist/ right now.
+    touch "$dir/src-tauri/build.rs"
     (cd "$dir/src-tauri" && cargo build --release)
 fi
 

@@ -1,6 +1,6 @@
 use rodio::source::SeekError;
 use rodio::{Decoder, OutputStream, Sink, Source};
-use rustfft::{num_complex::Complex, FftPlanner};
+use rustfft::{num_complex::Complex, Fft, FftPlanner};
 use std::f32::consts::PI;
 use std::fs::File;
 use std::io::BufReader;
@@ -211,6 +211,11 @@ pub struct Player {
     level: Arc<AtomicU32>,
     ring: Arc<Mutex<RingBuffer>>,
     sample_rate: Arc<AtomicU32>,
+    // RING_SIZE never changes, so the forward FFT plan (the expensive part of
+    // an FFT call — rustfft caches twiddle factors per-planner, which a fresh
+    // FftPlanner::new() would throw away) is built once and reused for every
+    // spectrum request instead of replanning on every animation frame.
+    fft: Arc<dyn Fft<f32>>,
 }
 
 impl Player {
@@ -219,6 +224,7 @@ impl Player {
         let level = Arc::new(AtomicU32::new(0));
         let ring = Arc::new(Mutex::new(RingBuffer::new(RING_SIZE)));
         let sample_rate = Arc::new(AtomicU32::new(44100));
+        let fft = FftPlanner::new().plan_fft_forward(RING_SIZE);
         let level_for_thread = level.clone();
         let ring_for_thread = ring.clone();
         let sample_rate_for_thread = sample_rate.clone();
@@ -274,6 +280,7 @@ impl Player {
             level,
             ring,
             sample_rate,
+            fft,
         }
     }
 
@@ -344,9 +351,7 @@ impl Player {
             })
             .collect();
 
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(n);
-        fft.process(&mut buf);
+        self.fft.process(&mut buf);
 
         let half = n / 2;
         let mags: Vec<f32> = buf[..half].iter().map(|c| c.norm()).collect();

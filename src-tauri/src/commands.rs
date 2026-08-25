@@ -142,7 +142,7 @@ pub fn remove_root(state: State<AppState>, path: String) -> Result<(), String> {
     indexer::remove_root(&conn, &path).map_err(|e| e.to_string())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct SearchFilters {
     text: Option<String>,
     root_path: Option<String>,
@@ -154,6 +154,83 @@ pub struct SearchFilters {
     sound_types: Option<Vec<String>>,
     limit: Option<i64>,
     offset: Option<i64>,
+    sort_by: Option<String>,
+    sort_dir: Option<String>,
+}
+
+/// Which facet dimension (if any) a query should leave out of its own WHERE
+/// clause — a facet must ignore its own selection so choosing one value
+/// doesn't hide the sibling values you could switch to (standard faceted
+/// search), while still respecting every other active filter, including
+/// folder scope.
+#[derive(Default, Clone, Copy)]
+struct FacetExclude {
+    categories: bool,
+    sound_types: bool,
+    folder: bool,
+}
+
+/// Builds the shared `WHERE` conditions (and bound params) used by search and
+/// every facet-count query, so folder/category/sound-type/search-text scoping
+/// stays consistent across all of them instead of drifting apart.
+fn build_conditions(
+    filters: &SearchFilters,
+    exclude: FacetExclude,
+) -> (bool, Vec<String>, Vec<Box<dyn rusqlite::ToSql>>) {
+    let mut conditions: Vec<String> = Vec::new();
+    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    let mut needs_fts = false;
+
+    if let Some(text) = filters.text.as_deref().filter(|t| !t.trim().is_empty()) {
+        let fts_query = sanitize_fts_query(text);
+        if !fts_query.is_empty() {
+            needs_fts = true;
+            conditions.push("files_fts MATCH ?".to_string());
+            params_vec.push(Box::new(fts_query));
+        }
+    }
+    if !exclude.folder {
+        if let Some(root) = filters.root_path.as_deref().filter(|s| !s.is_empty()) {
+            conditions.push("f.root_path = ?".to_string());
+            params_vec.push(Box::new(root.to_string()));
+        }
+        if let Some(folder) = filters.folder_path.as_deref().filter(|s| !s.is_empty()) {
+            conditions.push("(f.folder_path = ? OR f.folder_path LIKE ?)".to_string());
+            params_vec.push(Box::new(folder.to_string()));
+            params_vec.push(Box::new(format!("{folder}/%")));
+        }
+    }
+    if !exclude.categories {
+        if let Some(categories) = filters.categories.as_ref().filter(|c| !c.is_empty()) {
+            let placeholders = vec!["?"; categories.len()].join(",");
+            conditions.push(format!("f.parent_folder IN ({placeholders})"));
+            for c in categories {
+                params_vec.push(Box::new(c.clone()));
+            }
+        }
+    }
+    if let Some(min) = filters.min_secs {
+        conditions.push("f.duration_secs >= ?".to_string());
+        params_vec.push(Box::new(min));
+    }
+    if let Some(max) = filters.max_secs {
+        conditions.push("f.duration_secs <= ?".to_string());
+        params_vec.push(Box::new(max));
+    }
+    if filters.favorites_only.unwrap_or(false) {
+        conditions.push("f.favorite = 1".to_string());
+    }
+    if !exclude.sound_types {
+        if let Some(sound_types) = filters.sound_types.as_ref().filter(|c| !c.is_empty()) {
+            let clauses = vec!["f.dsp_tags LIKE ?"; sound_types.len()].join(" OR ");
+            conditions.push(format!("({clauses})"));
+            for t in sound_types {
+                params_vec.push(Box::new(format!("%,{t},%")));
+            }
+        }
+    }
+
+    (needs_fts, conditions, params_vec)
 }
 
 #[derive(Serialize)]
@@ -183,6 +260,24 @@ fn sanitize_fts_query(text: &str) -> String {
         .join(" ")
 }
 
+/// Maps a frontend-chosen sort column to a safe, hardcoded ORDER BY
+/// fragment — never interpolate the raw string, so this can't become a SQL
+/// injection vector.
+fn sort_clause(sort_by: Option<&str>, sort_dir: Option<&str>) -> &'static str {
+    let desc = matches!(sort_dir, Some(d) if d.eq_ignore_ascii_case("desc"));
+    match sort_by {
+        Some("name") if desc => "f.filename DESC",
+        Some("name") => "f.filename ASC",
+        Some("folder") if desc => "f.folder_path DESC, f.filename ASC",
+        Some("folder") => "f.folder_path ASC, f.filename ASC",
+        Some("duration") if desc => "f.duration_secs DESC, f.filename ASC",
+        Some("duration") => "f.duration_secs ASC, f.filename ASC",
+        Some("type") if desc => "f.dsp_tags DESC, f.filename ASC",
+        Some("type") => "f.dsp_tags ASC, f.filename ASC",
+        _ => "f.parent_folder ASC, f.filename ASC",
+    }
+}
+
 #[tauri::command]
 pub fn search_files(state: State<AppState>, filters: SearchFilters) -> Result<Vec<FileRow>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
@@ -193,57 +288,18 @@ pub fn search_files(state: State<AppState>, filters: SearchFilters) -> Result<Ve
         "SELECT f.id, f.path, f.root_path, f.filename, f.ext, f.parent_folder, f.folder_path, f.duration_secs, f.description, f.tags, f.dsp_tags, f.favorite
          FROM files f",
     );
-    let mut conditions: Vec<String> = Vec::new();
-    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-
-    if let Some(text) = filters.text.as_deref().filter(|t| !t.trim().is_empty()) {
-        let fts_query = sanitize_fts_query(text);
-        if !fts_query.is_empty() {
-            sql.push_str(" JOIN files_fts ON files_fts.rowid = f.id");
-            conditions.push("files_fts MATCH ?".to_string());
-            params_vec.push(Box::new(fts_query));
-        }
-    }
-    if let Some(root) = filters.root_path.filter(|s| !s.is_empty()) {
-        conditions.push("f.root_path = ?".to_string());
-        params_vec.push(Box::new(root));
-    }
-    if let Some(folder) = filters.folder_path.filter(|s| !s.is_empty()) {
-        conditions.push("(f.folder_path = ? OR f.folder_path LIKE ?)".to_string());
-        params_vec.push(Box::new(folder.clone()));
-        params_vec.push(Box::new(format!("{folder}/%")));
-    }
-    if let Some(categories) = filters.categories.filter(|c| !c.is_empty()) {
-        let placeholders = vec!["?"; categories.len()].join(",");
-        conditions.push(format!("f.parent_folder IN ({placeholders})"));
-        for c in categories {
-            params_vec.push(Box::new(c));
-        }
-    }
-    if let Some(min) = filters.min_secs {
-        conditions.push("f.duration_secs >= ?".to_string());
-        params_vec.push(Box::new(min));
-    }
-    if let Some(max) = filters.max_secs {
-        conditions.push("f.duration_secs <= ?".to_string());
-        params_vec.push(Box::new(max));
-    }
-    if filters.favorites_only.unwrap_or(false) {
-        conditions.push("f.favorite = 1".to_string());
-    }
-    if let Some(sound_types) = filters.sound_types.filter(|c| !c.is_empty()) {
-        let clauses = vec!["f.dsp_tags LIKE ?"; sound_types.len()].join(" OR ");
-        conditions.push(format!("({clauses})"));
-        for t in sound_types {
-            params_vec.push(Box::new(format!("%,{t},%")));
-        }
+    let (needs_fts, conditions, mut params_vec) = build_conditions(&filters, FacetExclude::default());
+    if needs_fts {
+        sql.push_str(" JOIN files_fts ON files_fts.rowid = f.id");
     }
 
     if !conditions.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&conditions.join(" AND "));
     }
-    sql.push_str(" ORDER BY f.parent_folder, f.filename LIMIT ? OFFSET ?");
+    sql.push_str(" ORDER BY ");
+    sql.push_str(sort_clause(filters.sort_by.as_deref(), filters.sort_dir.as_deref()));
+    sql.push_str(" LIMIT ? OFFSET ?");
     params_vec.push(Box::new(limit));
     params_vec.push(Box::new(offset));
 
@@ -270,34 +326,89 @@ pub fn search_files(state: State<AppState>, filters: SearchFilters) -> Result<Ve
     Ok(rows.flatten().collect())
 }
 
+#[derive(Serialize)]
+pub struct NamedCount {
+    name: String,
+    count: i64,
+}
+
+/// Sound types are counted in Rust rather than SQL because `dsp_tags` packs
+/// multiple comma-separated labels into one column (`,impact,bright,`), so a
+/// plain `GROUP BY` can't split them out.
 #[tauri::command]
-pub fn list_sound_types(state: State<AppState>) -> Result<Vec<String>, String> {
+pub fn list_sound_types(state: State<AppState>, filters: SearchFilters) -> Result<Vec<NamedCount>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn
-        .prepare("SELECT DISTINCT dsp_tags FROM files WHERE dsp_tags IS NOT NULL AND dsp_tags != ''")
-        .map_err(|e| e.to_string())?;
+    let (needs_fts, conditions, params_vec) = build_conditions(
+        &filters,
+        FacetExclude {
+            sound_types: true,
+            ..Default::default()
+        },
+    );
+
+    let mut sql = String::from(
+        "SELECT f.dsp_tags FROM files f WHERE f.dsp_tags IS NOT NULL AND f.dsp_tags != ''",
+    );
+    if needs_fts {
+        sql = sql.replace("FROM files f", "FROM files f JOIN files_fts ON files_fts.rowid = f.id");
+    }
+    if !conditions.is_empty() {
+        sql.push_str(" AND ");
+        sql.push_str(&conditions.join(" AND "));
+    }
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
     let rows = stmt
-        .query_map([], |row| row.get::<_, String>(0))
+        .query_map(param_refs.as_slice(), |row| row.get::<_, String>(0))
         .map_err(|e| e.to_string())?;
-    let mut set = std::collections::BTreeSet::new();
+
+    let mut counts: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
     for r in rows.flatten() {
         for tok in r.trim_matches(',').split(',') {
             if !tok.is_empty() {
-                set.insert(tok.to_string());
+                *counts.entry(tok.to_string()).or_insert(0) += 1;
             }
         }
     }
-    Ok(set.into_iter().collect())
+    Ok(counts
+        .into_iter()
+        .map(|(name, count)| NamedCount { name, count })
+        .collect())
 }
 
 #[tauri::command]
-pub fn list_categories(state: State<AppState>) -> Result<Vec<String>, String> {
+pub fn list_categories(state: State<AppState>, filters: SearchFilters) -> Result<Vec<NamedCount>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn
-        .prepare("SELECT DISTINCT parent_folder FROM files WHERE parent_folder IS NOT NULL AND parent_folder != '' ORDER BY parent_folder")
-        .map_err(|e| e.to_string())?;
+    let (needs_fts, conditions, params_vec) = build_conditions(
+        &filters,
+        FacetExclude {
+            categories: true,
+            ..Default::default()
+        },
+    );
+
+    let mut sql = String::from(
+        "SELECT f.parent_folder, COUNT(*) FROM files f WHERE f.parent_folder IS NOT NULL AND f.parent_folder != ''",
+    );
+    if needs_fts {
+        sql = sql.replace("FROM files f", "FROM files f JOIN files_fts ON files_fts.rowid = f.id");
+    }
+    if !conditions.is_empty() {
+        sql.push_str(" AND ");
+        sql.push_str(&conditions.join(" AND "));
+    }
+    sql.push_str(" GROUP BY f.parent_folder ORDER BY f.parent_folder");
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
     let rows = stmt
-        .query_map([], |row| row.get::<_, String>(0))
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(NamedCount {
+                name: row.get(0)?,
+                count: row.get(1)?,
+            })
+        })
         .map_err(|e| e.to_string())?;
     Ok(rows.flatten().collect())
 }
@@ -306,21 +417,69 @@ pub fn list_categories(state: State<AppState>) -> Result<Vec<String>, String> {
 pub struct FolderEntry {
     root_path: String,
     folder_path: String,
+    count: i64,
 }
 
+/// Returns every folder that exists in the library (unfiltered, so the tree
+/// itself never collapses out from under you as you navigate), each
+/// annotated with how many files directly in it match the *other* active
+/// filters (text/categories/sound types/duration/favorites — everything
+/// except folder scope itself). The frontend sums each node's own count with
+/// its descendants' to get the cumulative total shown next to a folder.
 #[tauri::command]
-pub fn list_folder_tree(state: State<AppState>) -> Result<Vec<FolderEntry>, String> {
+pub fn list_folder_tree(state: State<AppState>, filters: SearchFilters) -> Result<Vec<FolderEntry>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn
+
+    let mut all_stmt = conn
         .prepare("SELECT DISTINCT root_path, folder_path FROM files ORDER BY root_path, folder_path")
         .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(FolderEntry {
-                root_path: row.get(0)?,
-                folder_path: row.get(1)?,
-            })
+    let all_entries: Vec<(String, String)> = all_stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .collect();
+
+    let (needs_fts, conditions, params_vec) = build_conditions(
+        &filters,
+        FacetExclude {
+            folder: true,
+            ..Default::default()
+        },
+    );
+    let mut sql = String::from("SELECT f.root_path, f.folder_path, COUNT(*) FROM files f");
+    if needs_fts {
+        sql.push_str(" JOIN files_fts ON files_fts.rowid = f.id");
+    }
+    if !conditions.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&conditions.join(" AND "));
+    }
+    sql.push_str(" GROUP BY f.root_path, f.folder_path");
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
+    let count_rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
         })
         .map_err(|e| e.to_string())?;
-    Ok(rows.flatten().collect())
+    let mut counts: std::collections::HashMap<(String, String), i64> = std::collections::HashMap::new();
+    for r in count_rows.flatten() {
+        counts.insert((r.0, r.1), r.2);
+    }
+
+    Ok(all_entries
+        .into_iter()
+        .map(|(root_path, folder_path)| {
+            let count = counts
+                .get(&(root_path.clone(), folder_path.clone()))
+                .copied()
+                .unwrap_or(0);
+            FolderEntry {
+                root_path,
+                folder_path,
+                count,
+            }
+        })
+        .collect())
 }

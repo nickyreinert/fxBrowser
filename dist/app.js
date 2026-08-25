@@ -47,6 +47,10 @@
     loopPlayback: loadPref("fx.loop", true),
     playStartedAt: null,
     waveform: null,
+    groupBy: loadPref("fx.groupBy", "folder"), // "folder" | "type"
+    sortBy: loadPref("fx.sortBy", "name"), // "name" | "folder" | "duration"
+    sortDir: loadPref("fx.sortDir", "asc"), // "asc" | "desc"
+    playingFolderChain: new Set(), // "<root>::<folderPath|__root__>" keys along the now-playing file's folder branch
   };
 
   const tabButtons = document.querySelectorAll(".tab-btn");
@@ -149,15 +153,43 @@
   }
 
   // ---------------- Facets ----------------
+  // Shared shape sent to search_files and every facet-count command, so
+  // "what's currently visible" and "what's currently filterable" never
+  // drift apart. Each facet command excludes its own dimension server-side
+  // (so picking one sound type doesn't hide the sibling types), but still
+  // honors everything else here, including folder scope.
+  function currentFilterPayload() {
+    return {
+      text: state.searchText || null,
+      root_path: state.selectedFolder ? state.selectedFolder.root : null,
+      folder_path: state.selectedFolder ? state.selectedFolder.folder : null,
+      categories: state.selectedCategories.size ? Array.from(state.selectedCategories) : null,
+      min_secs: state.minSecs,
+      max_secs: state.maxSecs,
+      favorites_only: state.favoritesOnly || null,
+      sound_types: state.selectedSoundTypes.size ? Array.from(state.selectedSoundTypes) : null,
+    };
+  }
+
   async function refreshFacets() {
-    state.categories = await invoke("list_categories");
-    state.soundTypes = await invoke("list_sound_types");
-    state.folderTree = await invoke("list_folder_tree");
+    const filters = currentFilterPayload();
+    state.categories = await invoke("list_categories", { filters });
+    state.soundTypes = await invoke("list_sound_types", { filters });
+    state.folderTree = await invoke("list_folder_tree", { filters });
     const bounds = await invoke("get_duration_bounds");
     applyDurationBounds(bounds);
     renderCategories();
     renderSoundTypes();
     renderFolderTree();
+  }
+
+  // Call whenever a filter (search text, category/sound-type selection,
+  // duration range, favorites, or folder scope) changes: refreshes both the
+  // result list and the sidebar facet counts together, so the sidebar always
+  // reflects what's actually visible.
+  function onFiltersChanged() {
+    refreshFacets();
+    runSearch(true);
   }
 
   function applyDurationBounds(bounds) {
@@ -196,13 +228,12 @@
     wrap.innerHTML = "";
     for (const c of state.categories) {
       const chip = document.createElement("div");
-      chip.className = "chip" + (state.selectedCategories.has(c) ? " selected" : "");
-      chip.textContent = c;
+      chip.className = "chip" + (state.selectedCategories.has(c.name) ? " selected" : "");
+      chip.textContent = `${c.name} (${c.count})`;
       chip.addEventListener("click", () => {
-        if (state.selectedCategories.has(c)) state.selectedCategories.delete(c);
-        else state.selectedCategories.add(c);
-        renderCategories();
-        runSearch(true);
+        if (state.selectedCategories.has(c.name)) state.selectedCategories.delete(c.name);
+        else state.selectedCategories.add(c.name);
+        onFiltersChanged();
       });
       wrap.appendChild(chip);
     }
@@ -210,8 +241,7 @@
 
   el("clear-categories").addEventListener("click", () => {
     state.selectedCategories.clear();
-    renderCategories();
-    runSearch(true);
+    onFiltersChanged();
   });
 
   function renderSoundTypes() {
@@ -219,13 +249,12 @@
     wrap.innerHTML = "";
     for (const t of state.soundTypes) {
       const chip = document.createElement("div");
-      chip.className = "chip" + (state.selectedSoundTypes.has(t) ? " selected" : "");
-      chip.textContent = t;
+      chip.className = "chip" + (state.selectedSoundTypes.has(t.name) ? " selected" : "");
+      chip.textContent = `${t.name} (${t.count})`;
       chip.addEventListener("click", () => {
-        if (state.selectedSoundTypes.has(t)) state.selectedSoundTypes.delete(t);
-        else state.selectedSoundTypes.add(t);
-        renderSoundTypes();
-        runSearch(true);
+        if (state.selectedSoundTypes.has(t.name)) state.selectedSoundTypes.delete(t.name);
+        else state.selectedSoundTypes.add(t.name);
+        onFiltersChanged();
       });
       wrap.appendChild(chip);
     }
@@ -233,13 +262,12 @@
 
   el("clear-sound-types").addEventListener("click", () => {
     state.selectedSoundTypes.clear();
-    renderSoundTypes();
-    runSearch(true);
+    onFiltersChanged();
   });
 
   el("favorites-only").addEventListener("change", (e) => {
     state.favoritesOnly = e.target.checked;
-    runSearch(true);
+    onFiltersChanged();
   });
 
   function shortRootLabel(root) {
@@ -247,21 +275,42 @@
     return parts[parts.length - 1] || root;
   }
 
-  function buildFolderTree(folderSet) {
-    const tree = { children: {} };
-    for (const f of folderSet) {
-      if (!f) continue;
-      const parts = f.split("/").filter(Boolean);
+  // `entries` is [{path, count}] for a single root, `count` being how many
+  // files sit *directly* in that folder under the current filters. Builds
+  // the tree shape and, in the same pass, a per-node cumulative `total`
+  // (own files + every descendant's) so labels can show "(N)" for the whole
+  // subtree, not just what's directly inside it.
+  function buildFolderTree(entries) {
+    const tree = { children: {}, direct: 0, total: 0 };
+    for (const { path, count } of entries) {
+      if (!path) {
+        tree.direct = count;
+        continue;
+      }
+      const parts = path.split("/").filter(Boolean);
       let node = tree;
       let acc = "";
       for (const p of parts) {
         acc = acc ? `${acc}/${p}` : p;
         node.children = node.children || {};
-        node.children[p] = node.children[p] || { path: acc, children: undefined };
+        node.children[p] = node.children[p] || { path: acc, children: undefined, direct: 0, total: 0 };
         node = node.children[p];
       }
+      node.direct = count;
     }
+    computeFolderTotals(tree);
     return tree;
+  }
+
+  function computeFolderTotals(node) {
+    let sum = node.direct || 0;
+    if (node.children) {
+      for (const child of Object.values(node.children)) {
+        sum += computeFolderTotals(child);
+      }
+    }
+    node.total = sum;
+    return sum;
   }
 
   // Keeps only branches whose name matches `query`, or that contain a
@@ -328,8 +377,39 @@
   function selectFolder(root, folderPath) {
     state.selectedFolder = isFolderSelected(root, folderPath) ? null : { root, folder: folderPath };
     renderBreadcrumb();
+    renderFolderTree(); // immediate selection-highlight feedback; onFiltersChanged() re-renders again with fresh counts
+    onFiltersChanged();
+  }
+
+  // ---------------- Now-playing folder highlight ----------------
+  function computePlayingChain(f) {
+    const keys = new Set();
+    if (!f) return keys;
+    keys.add(`${f.root_path}::__root__`);
+    const folder = f.folder_path || "";
+    if (folder) {
+      const parts = folder.split("/").filter(Boolean);
+      let acc = "";
+      for (const p of parts) {
+        acc = acc ? `${acc}/${p}` : p;
+        keys.add(`${f.root_path}::${acc}`);
+      }
+    }
+    return keys;
+  }
+
+  function markPlayingFolder() {
+    state.playingFolderChain = computePlayingChain(state.selectedFile);
+    // Auto-expand every ancestor along the chain so the highlight is
+    // actually visible instead of hidden behind a collapsed branch.
+    for (const key of state.playingFolderChain) state.collapsedFolders.delete(key);
     renderFolderTree();
-    runSearch(true);
+  }
+
+  function clearPlayingFolder() {
+    if (state.playingFolderChain.size === 0) return;
+    state.playingFolderChain = new Set();
+    renderFolderTree();
   }
 
   function renderTreeLevel(root, node, forceExpand) {
@@ -359,8 +439,10 @@
       }
 
       const label = document.createElement("div");
-      label.className = "tree-node" + (isFolderSelected(root, child.path) ? " selected" : "");
-      label.textContent = name;
+      label.className = "tree-node"
+        + (isFolderSelected(root, child.path) ? " selected" : "")
+        + (state.playingFolderChain.has(`${root}::${child.path}`) ? " on-path" : "");
+      label.textContent = `${name} (${child.total})`;
       label.addEventListener("click", () => selectFolder(root, child.path));
 
       row.append(toggle, label);
@@ -378,8 +460,8 @@
     wrap.innerHTML = "";
     const byRoot = new Map();
     for (const entry of state.folderTree) {
-      if (!byRoot.has(entry.root_path)) byRoot.set(entry.root_path, new Set());
-      byRoot.get(entry.root_path).add(entry.folder_path);
+      if (!byRoot.has(entry.root_path)) byRoot.set(entry.root_path, []);
+      byRoot.get(entry.root_path).push({ path: entry.folder_path, count: entry.count });
     }
 
     const query = state.folderSearchText.trim().toLowerCase();
@@ -399,8 +481,10 @@
       const rootSpacer = document.createElement("span");
       rootSpacer.className = "tree-toggle leaf";
       const rootLabel = document.createElement("div");
-      rootLabel.className = "tree-node" + (isFolderSelected(root, null) ? " selected" : "");
-      rootLabel.textContent = shortRootLabel(root);
+      rootLabel.className = "tree-node"
+        + (isFolderSelected(root, null) ? " selected" : "")
+        + (state.playingFolderChain.has(`${root}::__root__`) ? " on-path" : "");
+      rootLabel.textContent = `${shortRootLabel(root)} (${tree.total})`;
       rootLabel.title = root;
       rootLabel.addEventListener("click", () => selectFolder(root, null));
       rootRow.append(rootSpacer, rootLabel);
@@ -420,7 +504,7 @@
   el("search-text").addEventListener("input", (e) => {
     state.searchText = e.target.value;
     clearTimeout(searchDebounce);
-    searchDebounce = setTimeout(() => runSearch(true), 250);
+    searchDebounce = setTimeout(() => onFiltersChanged(), 250);
   });
   el("min-secs").addEventListener("input", (e) => {
     let v = parseFloat(e.target.value);
@@ -432,7 +516,7 @@
     state.minSecs = v;
     updateLengthSliderUI();
   });
-  el("min-secs").addEventListener("change", () => runSearch(true));
+  el("min-secs").addEventListener("change", () => onFiltersChanged());
 
   el("max-secs").addEventListener("input", (e) => {
     let v = parseFloat(e.target.value);
@@ -444,7 +528,7 @@
     state.maxSecs = v;
     updateLengthSliderUI();
   });
-  el("max-secs").addEventListener("change", () => runSearch(true));
+  el("max-secs").addEventListener("change", () => onFiltersChanged());
 
   el("load-more").addEventListener("click", () => runSearch(false));
 
@@ -454,16 +538,11 @@
       state.results = [];
     }
     const filters = {
-      text: state.searchText || null,
-      root_path: state.selectedFolder ? state.selectedFolder.root : null,
-      folder_path: state.selectedFolder ? state.selectedFolder.folder : null,
-      categories: state.selectedCategories.size ? Array.from(state.selectedCategories) : null,
-      min_secs: state.minSecs,
-      max_secs: state.maxSecs,
-      favorites_only: state.favoritesOnly || null,
-      sound_types: state.selectedSoundTypes.size ? Array.from(state.selectedSoundTypes) : null,
+      ...currentFilterPayload(),
       limit: state.limit,
       offset: state.offset,
+      sort_by: state.sortBy,
+      sort_dir: state.sortDir,
     };
     const rows = await invoke("search_files", { filters });
     state.results = reset ? rows : state.results.concat(rows);
@@ -484,53 +563,157 @@
     el("results-meta").textContent = `${state.results.length} sound${state.results.length === 1 ? "" : "s"}`;
     const list = el("results-list");
     list.innerHTML = "";
-    state.results.forEach((f) => {
-      const row = document.createElement("div");
-      row.className = "result-row" + (state.selectedFile && state.selectedFile.id === f.id ? " selected" : "");
-      row.addEventListener("click", () => selectFile(f));
+    for (const group of buildGroups(state.results)) {
+      if (group.label !== null) {
+        const header = document.createElement("div");
+        header.className = "group-header";
+        header.textContent = `${group.label} (${group.files.length})`;
+        list.appendChild(header);
+      }
+      for (const f of group.files) list.appendChild(renderResultRow(f));
+    }
+  }
 
-      const heart = document.createElement("button");
-      heart.className = "row-heart" + (f.favorite ? " active" : "");
-      heart.textContent = f.favorite ? "♥" : "♡";
-      heart.title = "Favorite";
-      heart.addEventListener("click", (e) => {
-        e.stopPropagation();
-        toggleFavorite(f);
+  function renderResultRow(f) {
+    const row = document.createElement("div");
+    row.className = "result-row" + (state.selectedFile && state.selectedFile.id === f.id ? " selected" : "");
+    row.dataset.id = f.id;
+    row.addEventListener("click", () => selectFile(f));
+
+    const heart = document.createElement("button");
+    heart.className = "row-heart" + (f.favorite ? " active" : "");
+    heart.textContent = f.favorite ? "♥" : "♡";
+    heart.title = "Favorite";
+    heart.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleFavorite(f);
+    });
+
+    const name = document.createElement("div");
+    name.className = "result-name";
+    name.textContent = f.filename;
+    name.title = f.filename;
+
+    const cat = document.createElement("div");
+    cat.className = "result-category";
+    cat.textContent = f.folder_path || f.parent_folder || "";
+    cat.title = cat.textContent;
+
+    const dur = document.createElement("div");
+    dur.className = "result-duration";
+    dur.textContent = fmtDuration(f.duration_secs);
+
+    const drag = document.createElement("div");
+    drag.className = "result-drag";
+    drag.textContent = "⠿";
+    drag.title = "Drag into another app";
+    drag.addEventListener("mousedown", (e) => {
+      e.stopPropagation();
+      beginDrag(f);
+    });
+
+    row.append(heart, name, cat, dur, drag);
+    return row;
+  }
+
+  // A file's path relative to whatever folder is currently browsed (or its
+  // full folder_path, if browsing isn't scoped to a folder) — this is what
+  // "group by folder" buckets on, so grouping always reflects one level
+  // below wherever you currently are, not the library root.
+  function relativeFolder(f) {
+    const folder = f.folder_path || "";
+    if (state.selectedFolder && state.selectedFolder.root === f.root_path && state.selectedFolder.folder) {
+      const base = state.selectedFolder.folder;
+      if (folder === base) return "";
+      if (folder.startsWith(base + "/")) return folder.slice(base.length + 1);
+    }
+    return folder;
+  }
+
+  // Builds the grouped view of `rows` per state.groupBy:
+  //  - "folder": files directly in the current folder come first with no
+  //    header, followed by one group per immediate subfolder (files nested
+  //    deeper still fold into that same top subfolder's group) — only
+  //    emitted at all when at least one subfolder actually exists.
+  //  - "type": one group per primary DSP-detected sound type, plus an
+  //    "Unclassified" group (sorted last) for files with none.
+  function buildGroups(rows) {
+    if (state.groupBy === "type") {
+      const map = new Map();
+      for (const f of rows) {
+        const tags = (f.dsp_tags || "").split(",").filter(Boolean);
+        const key = tags.length ? tags[0] : "Unclassified";
+        if (!map.has(key)) map.set(key, []);
+        map.get(key).push(f);
+      }
+      const keys = Array.from(map.keys()).sort((a, b) => {
+        if (a === "Unclassified") return 1;
+        if (b === "Unclassified") return -1;
+        return a.localeCompare(b);
       });
+      return keys.map((label) => ({ label, files: map.get(label) }));
+    }
 
-      const name = document.createElement("div");
-      name.className = "result-name";
-      name.textContent = f.filename;
-      name.title = f.filename;
+    const direct = [];
+    const map = new Map();
+    for (const f of rows) {
+      const rel = relativeFolder(f);
+      if (!rel) {
+        direct.push(f);
+        continue;
+      }
+      const key = rel.split("/")[0];
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(f);
+    }
+    if (map.size === 0) return [{ label: null, files: direct }];
+    const groups = [{ label: null, files: direct }];
+    const keys = Array.from(map.keys()).sort((a, b) => a.localeCompare(b));
+    for (const key of keys) groups.push({ label: key, files: map.get(key) });
+    return groups;
+  }
 
-      const cat = document.createElement("div");
-      cat.className = "result-category";
-      cat.textContent = f.parent_folder || "";
+  // ---------------- Group-by / column sort ----------------
+  function updateGroupSwitchUI() {
+    document.querySelectorAll(".group-btn").forEach((b) => b.classList.toggle("active", b.dataset.group === state.groupBy));
+  }
+  document.querySelectorAll(".group-btn").forEach((b) => {
+    b.addEventListener("click", () => {
+      state.groupBy = b.dataset.group;
+      savePref("fx.groupBy", state.groupBy);
+      updateGroupSwitchUI();
+      renderResults();
+    });
+  });
 
-      const dur = document.createElement("div");
-      dur.className = "result-duration";
-      dur.textContent = fmtDuration(f.duration_secs);
-
-      const drag = document.createElement("div");
-      drag.className = "result-drag";
-      drag.textContent = "⠿";
-      drag.title = "Drag into another app";
-      drag.addEventListener("mousedown", (e) => {
-        e.stopPropagation();
-        beginDrag(f);
-      });
-
-      row.append(heart, name, cat, dur, drag);
-      list.appendChild(row);
+  function updateSortHeaderUI() {
+    document.querySelectorAll(".col-sort").forEach((b) => {
+      b.classList.toggle("sort-asc", b.dataset.sort === state.sortBy && state.sortDir === "asc");
+      b.classList.toggle("sort-desc", b.dataset.sort === state.sortBy && state.sortDir === "desc");
     });
   }
+  document.querySelectorAll(".col-sort").forEach((b) => {
+    b.addEventListener("click", () => {
+      const col = b.dataset.sort;
+      if (state.sortBy === col) {
+        state.sortDir = state.sortDir === "asc" ? "desc" : "asc";
+      } else {
+        state.sortBy = col;
+        state.sortDir = "asc";
+      }
+      savePref("fx.sortBy", state.sortBy);
+      savePref("fx.sortDir", state.sortDir);
+      updateSortHeaderUI();
+      runSearch(true);
+    });
+  });
 
   async function toggleFavorite(f) {
     const newVal = await invoke("toggle_favorite", { id: f.id });
     f.favorite = newVal;
     renderResults();
     updatePlayerFavoriteBtn();
-    if (state.favoritesOnly && !newVal) runSearch(true);
+    if (state.favoritesOnly && !newVal) onFiltersChanged();
   }
 
   function addMeta(container, k, v) {
@@ -665,12 +848,27 @@
     ctx.stroke();
   }
 
+  // Guards against overlapping IPC calls: each spectrum request is only
+  // fired once the previous one has resolved, instead of unconditionally on
+  // every animation frame. Without this, a request that takes longer than
+  // one frame (common under the software-rendering fallback this app uses
+  // on NVIDIA/Wayland — see fxbrowser.sh) causes calls to pile up faster
+  // than they drain, backing up the event loop and making the whole UI feel
+  // sluggish while something is playing.
+  let spectrumInFlight = false;
+
   function animatePlayhead() {
     drawWaveform();
     if (state.isPlaying) {
-      invoke("get_playback_spectrum", { bars: METER_BARS })
-        .then(updateLevelMeter)
-        .catch(() => {});
+      if (!spectrumInFlight) {
+        spectrumInFlight = true;
+        invoke("get_playback_spectrum", { bars: METER_BARS })
+          .then(updateLevelMeter)
+          .catch(() => {})
+          .finally(() => {
+            spectrumInFlight = false;
+          });
+      }
       waveformAnimFrame = requestAnimationFrame(animatePlayhead);
     }
   }
@@ -738,6 +936,7 @@
     state.isPlaying = true;
     state.playStartedAt = performance.now();
     updatePlayToggle();
+    markPlayingFolder();
     animatePlayhead();
   }
 
@@ -747,6 +946,7 @@
     state.playStartedAt = null;
     updatePlayToggle();
     stopVisualPlayback();
+    clearPlayingFolder();
   }
 
   el("play-toggle").addEventListener("click", () => {
@@ -766,6 +966,7 @@
       invoke("play_file", { path: f.path, loopPlayback: state.loopPlayback });
       state.isPlaying = true;
       updatePlayToggle();
+      markPlayingFolder();
       animatePlayhead();
     }
     await invoke("seek_playback", { secs }).catch(() => {});
@@ -872,12 +1073,18 @@
 
   // ---------------- Keyboard shortcuts ----------------
   function moveSelection(delta) {
-    if (state.results.length === 0) return;
-    let idx = state.selectedFile ? state.results.findIndex((f) => f.id === state.selectedFile.id) : -1;
-    idx = Math.max(0, Math.min(state.results.length - 1, idx + delta));
-    selectFile(state.results[idx]);
-    const rows = document.querySelectorAll(".result-row");
-    if (rows[idx]) rows[idx].scrollIntoView({ block: "nearest" });
+    // Grouping can reorder rows relative to state.results, so navigation
+    // walks the same flattened, grouped order that's actually on screen —
+    // otherwise arrow keys would jump to whatever row happens to sit at the
+    // same index in the ungrouped list, not the visually adjacent one.
+    const flat = buildGroups(state.results).flatMap((g) => g.files);
+    if (flat.length === 0) return;
+    let idx = state.selectedFile ? flat.findIndex((f) => f.id === state.selectedFile.id) : -1;
+    idx = Math.max(0, Math.min(flat.length - 1, idx + delta));
+    const f = flat[idx];
+    selectFile(f);
+    const rowEl = document.querySelector(`.result-row[data-id="${f.id}"]`);
+    if (rowEl) rowEl.scrollIntoView({ block: "nearest" });
   }
 
   document.addEventListener("keydown", (e) => {
@@ -894,7 +1101,7 @@
         input.value = "";
         state.searchText = "";
         clearTimeout(searchDebounce);
-        runSearch(true);
+        onFiltersChanged();
       }
       input.blur();
       return;
@@ -926,7 +1133,7 @@
       input.value += e.key;
       state.searchText = input.value;
       clearTimeout(searchDebounce);
-      searchDebounce = setTimeout(() => runSearch(true), 250);
+      searchDebounce = setTimeout(() => onFiltersChanged(), 250);
     }
   });
 
@@ -983,6 +1190,8 @@
   // ---------------- Init ----------------
   (async function init() {
     buildLevelMeter();
+    updateGroupSwitchUI();
+    updateSortHeaderUI();
     await loadRoots();
     switchView(state.roots.length === 0 ? "settings" : "browse");
   })();
